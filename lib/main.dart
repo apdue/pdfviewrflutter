@@ -64,6 +64,51 @@ extension SortOptionExtension on SortOption {
 }
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Set up PDF intent channel
+  const pdfChannel = MethodChannel('com.example.mypdf.test1/pdf_intent');
+  pdfChannel.setMethodCallHandler((call) async {
+    if (call.method == 'handlePdfFile') {
+      try {
+        final Map<String, dynamic> pdfData = Map<String, dynamic>.from(call.arguments);
+        final String path = pdfData['path'] as String;
+        final String scheme = pdfData['scheme'] as String;
+        
+        // Navigate to PDF viewer
+        final context = MyApp.navigatorKey.currentContext;
+        if (context != null) {
+          if (scheme == 'content') {
+            // For content URIs, use the URI directly
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(
+                builder: (context) => PDFViewerScreen(
+                  file: File.fromUri(Uri.parse(path)),
+                ),
+              ),
+              (route) => false,
+            );
+          } else {
+            // For file paths, use the path directly
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(
+                builder: (context) => PDFViewerScreen(
+                  file: File(path),
+                ),
+              ),
+              (route) => false,
+            );
+          }
+        }
+      } catch (e) {
+        print('Error handling PDF intent: $e');
+      }
+    }
+    return null;
+  });
+
   runApp(
     ChangeNotifierProvider(
       create: (_) => ThemeProvider(),
@@ -73,6 +118,9 @@ void main() {
 }
 
 class MyApp extends StatelessWidget {
+  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+  static String? initialPdfPath;
+  
   const MyApp({Key? key}) : super(key: key);
 
   @override
@@ -80,7 +128,8 @@ class MyApp extends StatelessWidget {
     return Consumer<ThemeProvider>(
       builder: (context, themeProvider, child) {
         return MaterialApp(
-          title: 'My PDF',
+          navigatorKey: navigatorKey,
+          title: 'PDF Viewer',
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
               seedColor: Colors.blue,
@@ -96,10 +145,39 @@ class MyApp extends StatelessWidget {
             useMaterial3: true,
           ),
           themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-          home: const HomeScreen(),
+          home: FutureBuilder<String?>(
+            future: _getInitialPdfPath(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Scaffold(
+                  body: Center(
+                    child: CircularProgressIndicator(),
+                  ),
+                );
+              }
+              
+              final pdfPath = snapshot.data;
+              if (pdfPath != null) {
+                return PDFViewerScreen(file: File(pdfPath));
+              }
+              
+              return const HomeScreen();
+            },
+          ),
         );
       },
     );
+  }
+
+  Future<String?> _getInitialPdfPath() async {
+    try {
+      final intent = await const MethodChannel('com.example.mypdf.test1/pdf_intent')
+          .invokeMethod<String>('getInitialPdfPath');
+      return intent;
+    } catch (e) {
+      print('Error getting initial PDF path: $e');
+      return null;
+    }
   }
 }
 
@@ -1180,123 +1258,146 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: isSearching
-            ? TextField(
-                controller: _searchController,
-                focusNode: _searchFocusNode,
-                decoration: InputDecoration(
-                  hintText: 'Search PDFs...',
-                  border: InputBorder.none,
-                  hintStyle: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.clear),
-                    onPressed: () {
-                      _searchController.clear();
-                      _filterPdfFiles('');
-                    },
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) {
+          return;
+        }
+        
+        if (isSelectionMode) {
+          setState(() {
+            isSelectionMode = false;
+            selectedFiles.clear();
+          });
+          return;
+        }
+
+        // Show exit dialog
+        final bool exitConfirmed = await _showExitDialog();
+        if (exitConfirmed && mounted) {
+          // Use SystemNavigator.pop() to exit the app
+          SystemNavigator.pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: isSearching
+              ? TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocusNode,
+                  decoration: InputDecoration(
+                    hintText: 'Search PDFs...',
+                    border: InputBorder.none,
+                    hintStyle: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _searchController.clear();
+                        _filterPdfFiles('');
+                      },
+                    ),
                   ),
-                ),
-                style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
-                autofocus: true,
-                onChanged: _filterPdfFiles,
-              )
-            : const Text('PDF Viewer'),
-        actions: [
-          if (!isSearching) IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: _activateSearch,
-            tooltip: 'Search',
-          ),
-          if (!isSearching) IconButton(
-            icon: Icon(isGridView ? Icons.view_list : Icons.grid_view),
-            onPressed: () {
-              setState(() {
-                isGridView = !isGridView;
-              });
-            },
-            tooltip: isGridView ? 'Switch to List View' : 'Switch to Grid View',
-          ),
-          if (!isSearching) PopupMenuButton<SortOption>(
-            icon: const Icon(Icons.sort),
-            tooltip: 'Sort',
-            onSelected: _changeSortOption,
-            itemBuilder: (context) => [
-              for (final option in SortOption.values)
-                PopupMenuItem(
-                  value: option,
-                  child: Row(
-                    children: [
-                      Icon(
-                        option.icon,
-                        color: currentSortOption == option 
-                            ? Theme.of(context).colorScheme.primary 
-                            : null,
-                        size: 20,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        option.displayName,
-                        style: TextStyle(
-                          fontWeight: currentSortOption == option 
-                              ? FontWeight.bold 
-                              : FontWeight.normal,
+                  style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
+                  autofocus: true,
+                  onChanged: _filterPdfFiles,
+                )
+              : const Text('PDF Viewer'),
+          actions: [
+            if (!isSearching) IconButton(
+              icon: const Icon(Icons.search),
+              onPressed: _activateSearch,
+              tooltip: 'Search',
+            ),
+            if (!isSearching) IconButton(
+              icon: Icon(isGridView ? Icons.view_list : Icons.grid_view),
+              onPressed: () {
+                setState(() {
+                  isGridView = !isGridView;
+                });
+              },
+              tooltip: isGridView ? 'Switch to List View' : 'Switch to Grid View',
+            ),
+            if (!isSearching) PopupMenuButton<SortOption>(
+              icon: const Icon(Icons.sort),
+              tooltip: 'Sort',
+              onSelected: _changeSortOption,
+              itemBuilder: (context) => [
+                for (final option in SortOption.values)
+                  PopupMenuItem(
+                    value: option,
+                    child: Row(
+                      children: [
+                        Icon(
+                          option.icon,
                           color: currentSortOption == option 
                               ? Theme.of(context).colorScheme.primary 
                               : null,
+                          size: 20,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        Text(
+                          option.displayName,
+                          style: TextStyle(
+                            fontWeight: currentSortOption == option 
+                                ? FontWeight.bold 
+                                : FontWeight.normal,
+                            color: currentSortOption == option 
+                                ? Theme.of(context).colorScheme.primary 
+                                : null,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-            ],
-          ),
-          if (!isSearching) IconButton(
-            icon: Icon(themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode),
-            onPressed: () => themeProvider.toggleTheme(),
-            tooltip: themeProvider.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode',
-          ),
-          if (!isSearching && !isSelectionMode) IconButton(
-            icon: const Icon(Icons.text_snippet),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => ExtractTextScreen(pdfFiles: allPdfFiles),
-                ),
-              );
-            },
-            tooltip: 'Extract Text',
-          ),
-          if (isSelectionMode) IconButton(
-            icon: const Icon(Icons.select_all),
-            onPressed: _selectAllFiles,
-            tooltip: 'Select All',
-          ),
-          if (isSelectionMode) IconButton(
-            icon: const Icon(Icons.share),
-            onPressed: () => _shareSelectedFiles(context),
-            tooltip: 'Share Selected',
-          ),
-          if (isSelectionMode) IconButton(
-            icon: const Icon(Icons.delete),
-            onPressed: _deleteSelectedFiles,
-            tooltip: 'Delete Selected',
-          ),
-          if (isSelectionMode) IconButton(
-            icon: const Icon(Icons.close),
-            onPressed: () {
-              setState(() {
-                isSelectionMode = false;
-                selectedFiles.clear();
-              });
-            },
-            tooltip: 'Exit Selection Mode',
-          ),
-        ],
+              ],
+            ),
+            if (!isSearching) IconButton(
+              icon: Icon(themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode),
+              onPressed: () => themeProvider.toggleTheme(),
+              tooltip: themeProvider.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode',
+            ),
+            if (!isSearching && !isSelectionMode) IconButton(
+              icon: const Icon(Icons.text_snippet),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => ExtractTextScreen(pdfFiles: allPdfFiles),
+                  ),
+                );
+              },
+              tooltip: 'Extract Text',
+            ),
+            if (isSelectionMode) IconButton(
+              icon: const Icon(Icons.select_all),
+              onPressed: _selectAllFiles,
+              tooltip: 'Select All',
+            ),
+            if (isSelectionMode) IconButton(
+              icon: const Icon(Icons.share),
+              onPressed: () => _shareSelectedFiles(context),
+              tooltip: 'Share Selected',
+            ),
+            if (isSelectionMode) IconButton(
+              icon: const Icon(Icons.delete),
+              onPressed: _deleteSelectedFiles,
+              tooltip: 'Delete Selected',
+            ),
+            if (isSelectionMode) IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                setState(() {
+                  isSelectionMode = false;
+                  selectedFiles.clear();
+                });
+              },
+              tooltip: 'Exit Selection Mode',
+            ),
+          ],
+        ),
+        body: _buildBody(),
       ),
-      body: _buildBody(),
     );
   }
 
@@ -1483,6 +1584,132 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
         ),
       ],
+    );
+  }
+
+  // Add exit dialog method
+  Future<bool> _showExitDialog() async {
+    try {
+      final bool? shouldExit = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _buildExitDialog(context),
+      );
+      
+      return shouldExit == true;
+    } catch (e) {
+      print('Error showing exit dialog: $e');
+      return false;
+    }
+  }
+
+  Widget _buildExitDialog(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      child: Container(
+        width: 300,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: colorScheme.surface,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              blurRadius: 15,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Top decoration
+            Container(
+              width: 70,
+              height: 70,
+              decoration: BoxDecoration(
+                color: colorScheme.primary.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.exit_to_app,
+                size: 40,
+                color: colorScheme.primary,
+              ),
+            ),
+            const SizedBox(height: 20),
+            
+            // Title
+            Text(
+              'Exit App',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 12),
+            
+            // Message
+            Text(
+              'Are you sure you want to exit the app?',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 16,
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 30),
+            
+            // Buttons
+            Row(
+              children: [
+                // Stay button
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: colorScheme.surfaceVariant,
+                      foregroundColor: colorScheme.onSurfaceVariant,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'No, Stay',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                
+                // Exit button
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: colorScheme.error,
+                      foregroundColor: colorScheme.onError,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Yes, Exit',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2077,14 +2304,13 @@ class PDFViewerScreen extends StatefulWidget {
   const PDFViewerScreen({Key? key, required this.file}) : super(key: key);
 
   @override
-  State<PDFViewerScreen> createState() => _PDFViewerScreenState();
+  _PDFViewerScreenState createState() => _PDFViewerScreenState();
 }
 
 class _PDFViewerScreenState extends State<PDFViewerScreen> {
   late PdfController _pdfController;
-  int _currentPage = 0;
-  int _totalPages = 0;
-  bool _isReady = false;
+  bool _isLoading = true;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -2093,9 +2319,21 @@ class _PDFViewerScreenState extends State<PDFViewerScreen> {
   }
 
   Future<void> _initPdf() async {
-    _pdfController = PdfController(
-      document: PdfDocument.openFile(widget.file.path),
-    );
+    try {
+      _pdfController = PdfController(
+        document: PdfDocument.openFile(widget.file.path),
+      );
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Error loading PDF: ${e.toString()}';
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   @override
@@ -2104,157 +2342,119 @@ class _PDFViewerScreenState extends State<PDFViewerScreen> {
     super.dispose();
   }
 
-  void _shareFile() async {
+  Future<void> _deletePdf() async {
     try {
-      final fileName = widget.file.path.split('/').last;
-      final result = await Share.shareXFiles(
-        [XFile(widget.file.path)],
-        subject: 'Sharing PDF: $fileName',
-        text: 'Check out this PDF file',
+      await widget.file.delete();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('PDF deleted successfully')),
       );
-      
-      if (result.status == ShareResultStatus.dismissed) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Share cancelled'),
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      }
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const HomeScreen()),
+        (route) => false,
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error sharing file: $e'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error deleting PDF: ${e.toString()}')),
+      );
     }
   }
 
-  void _deleteFile() async {
-    final shouldDelete = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete PDF'),
-        content: const Text('Are you sure you want to delete this PDF file?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('CANCEL'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('DELETE'),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-          ),
-        ],
-      ),
-    ) ?? false;
-
-    if (!shouldDelete || !mounted) return;
-
+  Future<void> _sharePdf() async {
     try {
-      await widget.file.delete();
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('PDF file deleted'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
+      await Share.shareFiles([widget.file.path]);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error deleting file: $e'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error sharing PDF: ${e.toString()}')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.file.path.split('/').last,
-          style: const TextStyle(fontSize: 18),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.share),
-            onPressed: _shareFile,
-            tooltip: 'Share PDF',
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) {
+          return;
+        }
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
+          (route) => false,
+        );
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.file.path.split('/').last),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () {
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (context) => const HomeScreen()),
+                (route) => false,
+              );
+            },
           ),
-          IconButton(
-            icon: Icon(
-              Icons.delete,
-              color: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: _deleteFile,
-            tooltip: 'Delete PDF',
-          ),
-        ],
-      ),
-      body: PdfView(
-        controller: _pdfController,
-        onDocumentLoaded: (document) {
-          setState(() {
-            _totalPages = document.pagesCount;
-            _isReady = true;
-          });
-        },
-        onPageChanged: (page) {
-          setState(() {
-            _currentPage = page;
-          });
-        },
-      ),
-      bottomNavigationBar: _isReady ? _buildNavigationBar() : null,
-    );
-  }
-
-  Widget _buildNavigationBar() {
-    return BottomAppBar(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
+          actions: [
             IconButton(
-              icon: const Icon(Icons.chevron_left),
-              onPressed: _currentPage > 0
-                  ? () => _pdfController.previousPage(
-                        curve: Curves.ease,
-                        duration: const Duration(milliseconds: 200),
-                      )
-                  : null,
-            ),
-            Text(
-              'Page ${_currentPage + 1} of $_totalPages',
-              style: const TextStyle(fontSize: 16),
+              icon: const Icon(Icons.share),
+              onPressed: _sharePdf,
             ),
             IconButton(
-              icon: const Icon(Icons.chevron_right),
-              onPressed: _currentPage < _totalPages - 1
-                  ? () => _pdfController.nextPage(
-                        curve: Curves.ease,
-                        duration: const Duration(milliseconds: 200),
-                      )
-                  : null,
+              icon: const Icon(Icons.delete),
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('Delete PDF'),
+                    content: const Text('Are you sure you want to delete this PDF?'),
+                    actions: [
+                      TextButton(
+                        child: const Text('Cancel'),
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                      TextButton(
+                        child: const Text('Delete'),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          _deletePdf();
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
           ],
         ),
+        body: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _errorMessage != null
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(_errorMessage!),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              _errorMessage = null;
+                              _isLoading = true;
+                            });
+                            _initPdf();
+                          },
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  )
+                : PdfView(
+                    controller: _pdfController,
+                    scrollDirection: Axis.vertical,
+                    pageSnapping: false,
+                  ),
       ),
     );
   }

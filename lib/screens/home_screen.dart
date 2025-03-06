@@ -1,15 +1,16 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/pdf_file_info.dart';
 import '../models/sort_option.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/pdf_grid_item.dart';
 import '../widgets/pdf_list_item.dart';
-import 'pdf_viewer_screen.dart';
+import '../widgets/pdf_viewer_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -19,6 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _scrollController = ScrollController();
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
+  DateTime? _lastBackPressed;
   
   List<PdfFileInfo> _pdfFiles = [];
   List<PdfFileInfo> _filteredFiles = [];
@@ -145,11 +147,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (!mounted) return;
 
-    Navigator.push(
+    Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(
-        builder: (context) => PdfViewerScreen(pdfInfo: pdfInfo),
+        builder: (context) => PDFViewerScreen(file: pdfInfo.file),
       ),
+      (route) => false,
     );
   }
 
@@ -212,122 +215,147 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: _isSelectionMode
-            ? Text('${_selectedFiles.length} selected')
-            : const Text('My PDF Files'),
-        actions: [
-          if (_isSelectionMode) ...[
-            IconButton(
-              icon: const Icon(Icons.share),
-              onPressed: _selectedFiles.isNotEmpty ? _shareSelectedFiles : null,
-              tooltip: 'Share selected files',
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete),
-              onPressed: _selectedFiles.isNotEmpty ? _deleteSelectedFiles : null,
-              tooltip: 'Delete selected files',
-            ),
-          ] else ...[
-            IconButton(
-              icon: Icon(_isGridView ? Icons.view_list : Icons.grid_view),
-              onPressed: () {
-                setState(() {
-                  _isGridView = !_isGridView;
-                });
-              },
-              tooltip: _isGridView ? 'Switch to list view' : 'Switch to grid view',
-            ),
-            PopupMenuButton<SortOption>(
-              icon: const Icon(Icons.sort),
-              tooltip: 'Sort files',
-              onSelected: (option) {
-                setState(() {
-                  _currentSortOption = option;
-                  _applySearchAndSort();
-                });
-              },
-              itemBuilder: (context) => SortOption.values.map((option) {
-                return PopupMenuItem(
-                  value: option,
-                  child: Row(
-                    children: [
-                      Icon(
-                        option.icon,
-                        size: 20,
-                        color: _currentSortOption == option
-                            ? Theme.of(context).colorScheme.primary
-                            : null,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        option.displayName,
-                        style: TextStyle(
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) {
+          return;
+        }
+        
+        if (_isSelectionMode) {
+          setState(() {
+            _isSelectionMode = false;
+            _selectedFiles.clear();
+          });
+          return;
+        }
+
+        // Show exit dialog
+        if (mounted) {
+          final bool exitConfirmed = await _showExitDialog();
+          if (exitConfirmed && mounted) {
+            // Use SystemNavigator.pop() to exit the app
+            SystemNavigator.pop();
+          }
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: _isSelectionMode
+              ? Text('${_selectedFiles.length} selected')
+              : const Text('My PDF Files'),
+          actions: [
+            if (_isSelectionMode) ...[
+              IconButton(
+                icon: const Icon(Icons.share),
+                onPressed: _selectedFiles.isNotEmpty ? _shareSelectedFiles : null,
+                tooltip: 'Share selected files',
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete),
+                onPressed: _selectedFiles.isNotEmpty ? _deleteSelectedFiles : null,
+                tooltip: 'Delete selected files',
+              ),
+            ] else ...[
+              IconButton(
+                icon: Icon(_isGridView ? Icons.view_list : Icons.grid_view),
+                onPressed: () {
+                  setState(() {
+                    _isGridView = !_isGridView;
+                  });
+                },
+                tooltip: _isGridView ? 'Switch to list view' : 'Switch to grid view',
+              ),
+              PopupMenuButton<SortOption>(
+                icon: const Icon(Icons.sort),
+                tooltip: 'Sort files',
+                onSelected: (option) {
+                  setState(() {
+                    _currentSortOption = option;
+                    _applySearchAndSort();
+                  });
+                },
+                itemBuilder: (context) => SortOption.values.map((option) {
+                  return PopupMenuItem(
+                    value: option,
+                    child: Row(
+                      children: [
+                        Icon(
+                          option.icon,
+                          size: 20,
                           color: _currentSortOption == option
                               ? Theme.of(context).colorScheme.primary
                               : null,
-                          fontWeight: _currentSortOption == option
-                              ? FontWeight.bold
-                              : null,
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-            ),
-            IconButton(
-              icon: Icon(
-                Provider.of<ThemeProvider>(context).isDarkMode
-                    ? Icons.light_mode
-                    : Icons.dark_mode,
+                        const SizedBox(width: 8),
+                        Text(
+                          option.displayName,
+                          style: TextStyle(
+                            color: _currentSortOption == option
+                                ? Theme.of(context).colorScheme.primary
+                                : null,
+                            fontWeight: _currentSortOption == option
+                                ? FontWeight.bold
+                                : null,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
               ),
-              onPressed: () {
-                Provider.of<ThemeProvider>(context, listen: false).toggleTheme();
-              },
-              tooltip: 'Toggle theme',
+              IconButton(
+                icon: Icon(
+                  Provider.of<ThemeProvider>(context).isDarkMode
+                      ? Icons.light_mode
+                      : Icons.dark_mode,
+                ),
+                onPressed: () {
+                  Provider.of<ThemeProvider>(context, listen: false).toggleTheme();
+                },
+                tooltip: 'Toggle theme',
+              ),
+            ],
+          ],
+        ),
+        body: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: TextField(
+                controller: _searchController,
+                focusNode: _searchFocusNode,
+                decoration: InputDecoration(
+                  hintText: 'Search PDF files...',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: _searchController.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () {
+                            _searchController.clear();
+                            _applySearchAndSort();
+                            _searchFocusNode.unfocus();
+                          },
+                        )
+                      : null,
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (value) => _applySearchAndSort(),
+              ),
+            ),
+            Expanded(
+              child: _buildBody(),
             ),
           ],
-        ],
-      ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: TextField(
-              controller: _searchController,
-              focusNode: _searchFocusNode,
-              decoration: InputDecoration(
-                hintText: 'Search PDF files...',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _searchController.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _searchController.clear();
-                          _applySearchAndSort();
-                          _searchFocusNode.unfocus();
-                        },
-                      )
-                    : null,
-                border: const OutlineInputBorder(),
+        ),
+        floatingActionButton: _isLoading
+            ? null
+            : FloatingActionButton(
+                onPressed: _loadPdfFiles,
+                tooltip: 'Refresh',
+                child: const Icon(Icons.refresh),
               ),
-              onChanged: (value) => _applySearchAndSort(),
-            ),
-          ),
-          Expanded(
-            child: _buildBody(),
-          ),
-        ],
       ),
-      floatingActionButton: _isLoading
-          ? null
-          : FloatingActionButton(
-              onPressed: _loadPdfFiles,
-              tooltip: 'Refresh',
-              child: const Icon(Icons.refresh),
-            ),
     );
   }
 
@@ -451,5 +479,98 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             },
           );
+  }
+
+  Future<bool> _showExitDialog() async {
+    try {
+      final bool? shouldExit = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _buildExitDialog(context),
+      );
+      
+      return shouldExit == true;
+    } catch (e) {
+      print('Error showing exit dialog: $e');
+      return false;
+    }
+  }
+
+  Widget _buildExitDialog(BuildContext context) {
+    final TextEditingController confirmController = TextEditingController();
+    
+    return StatefulBuilder(
+      builder: (context, setDialogState) {
+        return AlertDialog(
+          backgroundColor: Theme.of(context).colorScheme.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide(
+              color: Theme.of(context).colorScheme.primary,
+              width: 2,
+            ),
+          ),
+          title: Column(
+            children: [
+              Icon(
+                Icons.exit_to_app,
+                size: 48,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Are you sure?',
+                style: Theme.of(context).textTheme.headlineSmall,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Type "YES" to confirm exit',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: confirmController,
+                textAlign: TextAlign.center,
+                decoration: InputDecoration(
+                  hintText: 'YES',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                onChanged: (value) {
+                  setDialogState(() {
+                    // Trigger rebuild on text change
+                  });
+                },
+                autofocus: true,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('STAY'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: confirmController.text.toUpperCase() == 'YES' 
+                  ? Theme.of(context).colorScheme.error
+                  : Theme.of(context).colorScheme.error.withOpacity(0.3),
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              onPressed: confirmController.text.toUpperCase() == 'YES' 
+                ? () => Navigator.of(context).pop(true) 
+                : null,
+              child: const Text('EXIT'),
+            ),
+          ],
+        );
+      },
+    );
   }
 } 
